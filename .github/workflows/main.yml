@@ -1,0 +1,53 @@
+name: Build TCMU-1 Android APK Automatically
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.0'
+          channel: 'stable'
+
+      - name: Prepare & Build APK
+        run: |
+          if [ -d "TCMU1_Complete_VSCode_APK_Builder" ]; then
+            cp -r TCMU1_Complete_VSCode_APK_Builder/* .
+          fi
+          if [ -d "TCMU1_Universal_Controller_VSCode_Project" ]; then
+            cp -r TCMU1_Universal_Controller_VSCode_Project/* .
+          fi
+          mv lib/main.dart lib/main.dart.bak
+          mv pubspec.yaml pubspec.yaml.bak
+          mv android/app/src/main/AndroidManifest.xml AndroidManifest.xml.bak
+          flutter create . --project-name tcmu1_universal_controller --org com.tcmu1.controller
+          mv lib/main.dart.bak lib/main.dart
+          mv pubspec.yaml.bak pubspec.yaml
+          mv AndroidManifest.xml.bak android/app/src/main/AndroidManifest.xml
+          cat << 'EOF' > android/app/src/main/kotlin/com/tcmu1/controller/MainActivity.kt
+          package com.tcmu1.controller
+          import io.flutter.embedding.android.FlutterFragmentActivity
+          class MainActivity: FlutterFragmentActivity() {}
+          EOF
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TCMU1-Smart-Billing-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
