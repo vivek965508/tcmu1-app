@@ -8,9 +8,6 @@ jobs:
   build-android-apk:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -23,31 +20,656 @@ jobs:
           flutter-version: '3.19.0'
           channel: 'stable'
 
-      - name: Prepare & Build APK
+      - name: Create Clean Self-Contained Flutter + Native Android Project
         run: |
-          if [ -d "TCMU1_Complete_VSCode_APK_Builder" ]; then
-            cp -r TCMU1_Complete_VSCode_APK_Builder/* .
-          fi
-          if [ -d "TCMU1_Universal_Controller_VSCode_Project" ]; then
-            cp -r TCMU1_Universal_Controller_VSCode_Project/* .
-          fi
-          mv lib/main.dart lib/main.dart.bak
-          mv pubspec.yaml pubspec.yaml.bak
-          mv android/app/src/main/AndroidManifest.xml AndroidManifest.xml.bak
-          flutter create . --project-name tcmu1_universal_controller --org com.tcmu1.controller
-          mv lib/main.dart.bak lib/main.dart
-          mv pubspec.yaml.bak pubspec.yaml
-          mv AndroidManifest.xml.bak android/app/src/main/AndroidManifest.xml
+          mkdir -p clean_app
+          cd clean_app
+          flutter create . --project-name tcmu1_app --org com.tcmu1.controller --platforms=android
+
+          cat << 'EOF' > pubspec.yaml
+          name: tcmu1_app
+          description: TCMU-1 Universal GSM Motor Controller & Cash Memo Billing
+          publish_to: 'none'
+          version: 1.0.0+1
+
+          environment:
+            sdk: ">=3.0.0 <4.0.0"
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            shared_preferences: ^2.2.2
+            intl: ^0.19.0
+            share_plus: ^7.2.2
+
+          flutter:
+            uses-material-design: true
+          EOF
+
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SEND_SMS"/>
+              <uses-permission android:name="android.permission.RECEIVE_SMS"/>
+              <uses-permission android:name="android.permission.READ_SMS"/>
+              <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+              <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+
+              <application
+                  android:label="TCMU-1 Smart Billing"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme"
+                        />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+          mkdir -p android/app/src/main/kotlin/com/tcmu1/controller
           cat << 'EOF' > android/app/src/main/kotlin/com/tcmu1/controller/MainActivity.kt
           package com.tcmu1.controller
-          import io.flutter.embedding.android.FlutterFragmentActivity
-          class MainActivity: FlutterFragmentActivity() {}
+
+          import android.Manifest
+          import android.app.KeyguardManager
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Telephony
+          import android.telephony.SmsManager
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.tcmu1.controller/native"
+              private var methodChannel: MethodChannel? = null
+              private var smsReceiver: BroadcastReceiver? = null
+              private var pendingAuthResult: MethodChannel.Result? = null
+              private val AUTH_REQ_CODE = 901
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                  methodChannel?.setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "requestPermissions" -> {
+                              ActivityCompat.requestPermissions(
+                                  this,
+                                  arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS),
+                                  101
+                              )
+                              result.success(true)
+                          }
+                          "sendSms" -> {
+                              val number = call.argument<String>("number") ?: ""
+                              val message = call.argument<String>("message") ?: ""
+                              try {
+                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+                                      val smsManager = SmsManager.getDefault()
+                                      smsManager.sendTextMessage(number, null, message, null, null)
+                                      result.success(true)
+                                  } else {
+                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS), 101)
+                                      result.success(false)
+                                  }
+                              } catch (e: Exception) {
+                                  result.success(false)
+                              }
+                          }
+                          "authenticateDevice" -> {
+                              val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                              if (km.isKeyguardSecure) {
+                                  val intent = km.createConfirmDeviceCredentialIntent("TCMU-1 Security", "Unlock with your Phone PIN, Pattern, or Fingerprint")
+                                  if (intent != null) {
+                                      pendingAuthResult = result
+                                      startActivityForResult(intent, AUTH_REQ_CODE)
+                                  } else {
+                                      result.success(true)
+                                  }
+                              } else {
+                                  result.success(true)
+                              }
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == AUTH_REQ_CODE) {
+                      pendingAuthResult?.success(resultCode == RESULT_OK)
+                      pendingAuthResult = null
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  smsReceiver = object : BroadcastReceiver() {
+                      override fun onReceive(context: Context?, intent: Intent?) {
+                          if (intent?.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
+                              val msgs = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+                              val sb = StringBuilder()
+                              var sender = ""
+                              for (msg in msgs) {
+                                  sender = msg.originatingAddress ?: ""
+                                  sb.append(msg.messageBody)
+                              }
+                              methodChannel?.invokeMethod("onSmsReceived", mapOf("sender" to sender, "body" to sb.toString()))
+                          }
+                      }
+                  }
+                  val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(smsReceiver, filter, Context.RECEIVER_EXPORTED)
+                  } else {
+                      registerReceiver(smsReceiver, filter)
+                  }
+              }
+
+              override fun onDestroy() {
+                  if (smsReceiver != null) {
+                      unregisterReceiver(smsReceiver)
+                  }
+                  super.onDestroy()
+              }
+          }
           EOF
+
+          cat << 'EOF' > lib/main.dart
+          import 'dart:async';
+          import 'dart:convert';
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:intl/intl.dart';
+          import 'package:share_plus/share_plus.dart';
+
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const TcmuApp());
+          }
+
+          class TcmuApp extends StatelessWidget {
+            const TcmuApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'TCMU-1 Smart Billing',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  useMaterial3: true,
+                  colorSchemeSeed: const Color(0xFF0F766E),
+                ),
+                home: const DashboardPage(),
+              );
+            }
+          }
+
+          class DashboardPage extends StatefulWidget {
+            const DashboardPage({super.key});
+            @override
+            State<DashboardPage> createState() => _DashboardPageState();
+          }
+
+          class _DashboardPageState extends State<DashboardPage> {
+            static const platform = MethodChannel('com.tcmu1.controller/native');
+            int _tab = 0;
+            bool _settingsUnlocked = false;
+
+            String _motorSim = '+919876543210';
+            double _stickyRate = 120.0;
+            bool _autoMode = true;
+            List<String> _users = ['8081728811', '7839455008', '', '9236504217'];
+
+            String _cmdStart = '1*';
+            String _replyStart = 'PUMP STARTED';
+            String _cmdStop = '2*';
+            String _replyStop = 'PUMP STOPPED';
+            String _replyTimerStart = 'PUMP STARTED';
+            String _replyTimerEnd = 'PUMP STOPPED';
+            String _replyPowerCut = 'POWER OFF PUMP OFF';
+            String _replyPowerResume = 'POWER RESUME PUMP STARTED';
+            String _replyPhysStart = 'manual start';
+            String _replyPhysStop = 'manual stop';
+
+            String _motorState = 'STOPPED';
+            String _powerState = 'AVAILABLE';
+            String _signal = '63%';
+            String _activeCustomer = '';
+            String _activeMode = 'Normal (1*)';
+            int _runSec = 0;
+            int _cutSec = 0;
+            int _targetSec = 0;
+            int _cooldown = 0;
+            Timer? _clock;
+            Timer? _cdTimer;
+
+            final TextEditingController _custCtrl = TextEditingController();
+            final TextEditingController _rateCtrl = TextEditingController(text: '120');
+            final TextEditingController _manualAmtCtrl = TextEditingController();
+
+            List<Map<String, dynamic>> _history = [];
+
+            @override
+            void initState() {
+              super.initState();
+              _loadPrefs();
+              platform.invokeMethod('requestPermissions');
+              platform.setMethodCallHandler((call) async {
+                if (call.method == 'onSmsReceived') {
+                  final map = Map<String, dynamic>.from(call.arguments);
+                  _handleIncomingSms(map['body'] ?? '');
+                }
+              });
+            }
+
+            Future<void> _loadPrefs() async {
+              final p = await SharedPreferences.getInstance();
+              setState(() {
+                _motorSim = p.getString('motorSim') ?? '+919876543210';
+                _stickyRate = p.getDouble('stickyRate') ?? 120.0;
+                _rateCtrl.text = _stickyRate.toStringAsFixed(0);
+                _autoMode = p.getBool('autoMode') ?? true;
+                _users = p.getStringList('users') ?? ['8081728811', '7839455008', '', '9236504217'];
+                _cmdStart = p.getString('cmdStart') ?? '1*';
+                _replyStart = p.getString('replyStart') ?? 'PUMP STARTED';
+                _cmdStop = p.getString('cmdStop') ?? '2*';
+                _replyStop = p.getString('replyStop') ?? 'PUMP STOPPED';
+                _replyTimerStart = p.getString('replyTimerStart') ?? 'PUMP STARTED';
+                _replyTimerEnd = p.getString('replyTimerEnd') ?? 'PUMP STOPPED';
+                _replyPowerCut = p.getString('replyPowerCut') ?? 'POWER OFF PUMP OFF';
+                _replyPowerResume = p.getString('replyPowerResume') ?? 'POWER RESUME PUMP STARTED';
+                _replyPhysStart = p.getString('replyPhysStart') ?? 'manual start';
+                _replyPhysStop = p.getString('replyPhysStop') ?? 'manual stop';
+                final rawHist = p.getStringList('history') ?? [];
+                _history = rawHist.map((e) => Map<String, dynamic>.from(jsonDecode(e))).toList();
+              });
+            }
+
+            Future<void> _savePrefs() async {
+              final p = await SharedPreferences.getInstance();
+              await p.setString('motorSim', _motorSim);
+              await p.setDouble('stickyRate', _stickyRate);
+              await p.setBool('autoMode', _autoMode);
+              await p.setStringList('users', _users);
+              await p.setString('cmdStart', _cmdStart);
+              await p.setString('replyStart', _replyStart);
+              await p.setString('cmdStop', _cmdStop);
+              await p.setString('replyStop', _replyStop);
+              await p.setString('replyTimerStart', _replyTimerStart);
+              await p.setString('replyTimerEnd', _replyTimerEnd);
+              await p.setString('replyPowerCut', _replyPowerCut);
+              await p.setString('replyPowerResume', _replyPowerResume);
+              await p.setString('replyPhysStart', _replyPhysStart);
+              await p.setString('replyPhysStop', _replyPhysStop);
+              await p.setStringList('history', _history.map((e) => jsonEncode(e)).toList());
+            }
+
+            void _sendSms(String cmd) async {
+              if (_cooldown > 0) {
+                _toast('Wait $_cooldown sec (Anti-Spam Lock)');
+                return;
+              }
+              setState(() => _cooldown = 30);
+              _cdTimer?.cancel();
+              _cdTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+                if (_cooldown <= 1) {
+                  t.cancel();
+                  setState(() => _cooldown = 0);
+                } else {
+                  setState(() => _cooldown--);
+                }
+              });
+              await platform.invokeMethod('sendSms', {'number': _motorSim, 'message': cmd});
+              _toast('SMS Sent: $cmd -> $_motorSim');
+            }
+
+            void _handleIncomingSms(String raw) {
+              final up = raw.trim().toUpperCase();
+              if (up.contains('TCMU-1 USERS') || up.contains('USER1')) {
+                final List<String> parsed = ['', '', '', ''];
+                for (int i = 1; i <= 4; i++) {
+                  final rx = RegExp(r'USER\s*' + i.toString() + r'\s*=\s*(\d{10,12})', caseSensitive: false);
+                  final m = rx.firstMatch(raw);
+                  if (m != null) parsed[i - 1] = m.group(1) ?? '';
+                }
+                setState(() => _users = parsed);
+                _savePrefs();
+                _toast('Synced *TCMU-1 USERS* from Device!');
+                return;
+              }
+              if (up.contains(_replyPowerCut.toUpperCase())) {
+                setState(() {
+                  _motorState = 'PAUSED';
+                  _powerState = 'OFF (POWER CUT)';
+                });
+                _toast('Power Cut! Billing Timer PAUSED.');
+                return;
+              }
+              if (up.contains(_replyPowerResume.toUpperCase())) {
+                setState(() {
+                  _motorState = 'RUNNING';
+                  _powerState = 'AVAILABLE';
+                });
+                _startClock();
+                _toast('Power Resumed! Timer RESUMED.');
+                return;
+              }
+              if (up.contains(_replyPhysStart.toUpperCase())) {
+                _beginSession('Physical Start Customer', 'Physical Button Start', 0, sendCmd: false);
+                return;
+              }
+              if (up.contains(_replyPhysStop.toUpperCase()) || up.contains(_replyStop.toUpperCase()) || up.contains(_replyTimerEnd.toUpperCase())) {
+                if (_motorState != 'STOPPED') _stopSession(sendCmd: false);
+                return;
+              }
+              if (up.contains(_replyStart.toUpperCase()) || up.contains(_replyTimerStart.toUpperCase())) {
+                if (_motorState == 'STOPPED') {
+                  _beginSession(_custCtrl.text.isEmpty ? 'Customer' : _custCtrl.text, 'Normal (1*)', 0, sendCmd: false);
+                }
+              }
+            }
+
+            void _beginSession(String cname, String mode, int timerMinutes, {bool sendCmd = true}) {
+              final double r = double.tryParse(_rateCtrl.text) ?? _stickyRate;
+              _stickyRate = r;
+              _savePrefs();
+              setState(() {
+                _activeCustomer = cname;
+                _activeMode = mode;
+                _motorState = 'RUNNING';
+                _runSec = 0;
+                _cutSec = 0;
+                _targetSec = timerMinutes * 60;
+              });
+              if (sendCmd) {
+                if (timerMinutes > 0) {
+                  final int x = (timerMinutes / 30).ceil().clamp(1, 47);
+                  _sendSms('3*$x');
+                } else {
+                  _sendSms(_cmdStart);
+                }
+              }
+              _startClock();
+            }
+
+            void _startClock() {
+              _clock?.cancel();
+              _clock = Timer.periodic(const Duration(seconds: 1), (t) {
+                setState(() {
+                  if (_motorState == 'RUNNING') {
+                    _runSec++;
+                    if (_targetSec > 0 && _runSec >= _targetSec) {
+                      _stopSession(sendCmd: false);
+                    }
+                  } else if (_motorState == 'PAUSED') {
+                    _cutSec++;
+                  }
+                });
+              });
+            }
+
+            void _stopSession({bool sendCmd = true}) {
+              _clock?.cancel();
+              if (sendCmd) _sendSms(_cmdStop);
+              final double calc = (_runSec / 3600.0) * _stickyRate;
+              final double? man = double.tryParse(_manualAmtCtrl.text.trim());
+              final double finalBill = man ?? calc;
+              final rec = {
+                'date': DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now()),
+                'customer': _activeCustomer.isEmpty ? 'Walk-in Customer' : _activeCustomer,
+                'mode': _activeMode,
+                'runSec': _runSec,
+                'cutSec': _cutSec,
+                'rate': _stickyRate,
+                'bill': finalBill,
+                'isManual': man != null,
+                'isPaid': true,
+              };
+              setState(() {
+                _motorState = 'STOPPED';
+                _history.insert(0, rec);
+                _manualAmtCtrl.clear();
+              });
+              _savePrefs();
+              _toast('Cash Memo Generated: ₹${finalBill.toStringAsFixed(2)}');
+            }
+
+            String _hms(int s) {
+              final h = (s ~/ 3600).toString().padLeft(2, '0');
+              final m = ((s % 3600) ~/ 60).toString().padLeft(2, '0');
+              final sec = (s % 60).toString().padLeft(2, '0');
+              return '$h:$m:$sec';
+            }
+
+            void _toast(String m) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m), duration: const Duration(seconds: 2)));
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final double? man = double.tryParse(_manualAmtCtrl.text.trim());
+              final double liveBill = man ?? ((_runSec / 3600.0) * _stickyRate);
+
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('TCMU-1 Smart Controller'),
+                  backgroundColor: const Color(0xFF0F766E),
+                  foregroundColor: Colors.white,
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.sync),
+                      tooltip: 'Status (5*)',
+                      onPressed: () => _sendSms('5*'),
+                    ),
+                  ],
+                ),
+                body: IndexedStack(
+                  index: _tab,
+                  children: [
+                    ListView(
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('PUMP: $_motorState | POWER: $_powerState | SIGNAL: $_signal',
+                                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 8),
+                                Text('Running Time: ${_hms(_runSec)}',
+                                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.teal)),
+                                Text('Power Cut Minus: ${_hms(_cutSec)}'),
+                                const SizedBox(height: 6),
+                                Text('CASH MEMO BILL: ₹${liveBill.toStringAsFixed(2)}',
+                                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _custCtrl,
+                          decoration: const InputDecoration(labelText: 'Customer Name (ग्राहक का नाम)', border: OutlineInputBorder()),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _rateCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'Sticky Rate ₹/hr', border: OutlineInputBorder()),
+                                onChanged: (v) {
+                                  final r = double.tryParse(v);
+                                  if (r != null && r > 0) {
+                                    setState(() => _stickyRate = r);
+                                    _savePrefs();
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: TextField(
+                                controller: _manualAmtCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'Manual Fixed ₹ (Optional)', border: OutlineInputBorder()),
+                                onChanged: (_) => setState(() {}),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade700, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(50)),
+                          onPressed: () => _beginSession(_custCtrl.text.isEmpty ? 'Customer' : _custCtrl.text, 'Normal (1*)', 0),
+                          child: Text(_cooldown > 0 ? 'LOCKED ($_cooldown s)' : '🟢 NORMAL START (1*)'),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(48)),
+                                onPressed: () => _beginSession(_custCtrl.text.isEmpty ? 'Timer Customer' : _custCtrl.text, 'Timer 1Hr (3*2)', 60),
+                                child: const Text('⏱️ TIMER 1 HR (3*2)'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.orange.shade800, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(48)),
+                                onPressed: () {
+                                  setState(() => _motorState = 'RUNNING');
+                                  _startClock();
+                                  _sendSms(_cmdStart);
+                                },
+                                child: const Text('▶️ CONTINUE START'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(54)),
+                          onPressed: () => _stopSession(sendCmd: true),
+                          child: const Text('🔴 STOP MOTOR & SAVE CASH MEMO (2*)'),
+                        ),
+                      ],
+                    ),
+                    ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: _history.length,
+                      itemBuilder: (ctx, i) {
+                        final r = _history[i];
+                        return Card(
+                          child: ListTile(
+                            title: Text('${r['customer']} — ₹${(r['bill'] as num).toStringAsFixed(2)}'),
+                            subtitle: Text('${r['date']} | Run: ${_hms(r['runSec'] ?? 0)} | Rate: ₹${r['rate']}/hr'),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.share, color: Colors.teal),
+                              onPressed: () {
+                                Share.share('🧾 *CASH MEMO*\nDate: ${r['date']}\nCustomer: ${r['customer']}\nRunning Time: ${_hms(r['runSec'] ?? 0)}\nRate: ₹${r['rate']}/hr\n*TOTAL BILL: ₹${(r['bill'] as num).toStringAsFixed(2)}*');
+                              },
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    ListView(
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        TextField(
+                          decoration: const InputDecoration(labelText: 'Motor Controller SIM Number'),
+                          controller: TextEditingController(text: _motorSim),
+                          onSubmitted: (v) {
+                            setState(() => _motorSim = v);
+                            _savePrefs();
+                          },
+                        ),
+                        SwitchListTile(
+                          title: const Text('Auto-Restart on Power Cut (4*1 / 4*0)'),
+                          value: _autoMode,
+                          onChanged: (v) {
+                            setState(() => _autoMode = v);
+                            _savePrefs();
+                            _sendSms(v ? '4*1' : '4*0');
+                          },
+                        ),
+                        const Divider(),
+                        const Text('*TCMU-1 USERS* (10*, 11*-14*, 16*)', style: TextStyle(fontWeight: FontWeight.bold)),
+                        for (int i = 0; i < 4; i++)
+                          ListTile(
+                            title: Text('USER ${i + 1}: ${_users[i].isEmpty ? "Empty" : _users[i]}'),
+                            trailing: TextButton(
+                              onPressed: () => _sendSms('16*${i + 1}'),
+                              child: const Text('DEL', style: TextStyle(color: Colors.red)),
+                            ),
+                          ),
+                        ElevatedButton(
+                          onPressed: () => _sendSms('10*'),
+                          child: const Text('Sync Users from Device (10*)'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                bottomNavigationBar: NavigationBar(
+                  selectedIndex: _tab,
+                  onDestinationSelected: (idx) async {
+                    if (idx == 2 && !_settingsUnlocked) {
+                      final bool ok = await platform.invokeMethod('authenticateDevice') ?? true;
+                      if (!ok) return;
+                      _settingsUnlocked = true;
+                    }
+                    setState(() => _tab = idx);
+                  },
+                  destinations: const [
+                    NavigationDestination(icon: Icon(Icons.power_settings_new), label: 'Home'),
+                    NavigationDestination(icon: Icon(Icons.receipt_long), label: 'Cash Memo'),
+                    NavigationDestination(icon: Icon(Icons.security), label: 'Settings'),
+                  ],
+                ),
+              );
+            }
+          }
+          EOF
+
           flutter pub get
           flutter build apk --release --no-tree-shake-icons
 
-      - name: Upload APK
+      - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
           name: TCMU1-Smart-Billing-Release-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: clean_app/build/app/outputs/flutter-apk/app-release.apk
