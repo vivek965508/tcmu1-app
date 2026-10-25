@@ -17,45 +17,21 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0'
+          flutter-version: '3.22.0'
           channel: 'stable'
 
-      - name: Create Clean Self-Contained Flutter + Native Android Project
+      - name: Generate Clean Project and Build APK
         run: |
-          mkdir -p clean_app
-          cd clean_app
-          flutter create . --project-name tcmu1_app --org com.tcmu1.controller --platforms=android
+          flutter create tcmu1_app --org com.tcmu1.controller --platforms=android
+          cd tcmu1_app
 
-          cat << 'EOF' > pubspec.yaml
-          name: tcmu1_app
-          description: TCMU-1 Universal GSM Motor Controller & Cash Memo Billing
-          publish_to: 'none'
-          version: 1.0.0+1
+          python3 - << 'PYEOF'
+          import os
 
-          environment:
-            sdk: ">=3.0.0 <4.0.0"
-
-          dependencies:
-            flutter:
-              sdk: flutter
-            shared_preferences: ^2.2.2
-            intl: ^0.19.0
-            share_plus: ^7.2.2
-
-          flutter:
-            uses-material-design: true
-          EOF
-
-          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          manifest = '''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.SEND_SMS"/>
               <uses-permission android:name="android.permission.RECEIVE_SMS"/>
               <uses-permission android:name="android.permission.READ_SMS"/>
-              <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
-              <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
-              <uses-permission android:name="android.permission.WAKE_LOCK"/>
-              <uses-permission android:name="android.permission.VIBRATE"/>
-
               <application
                   android:label="TCMU-1 Smart Billing"
                   android:name="${applicationName}"
@@ -81,12 +57,12 @@ jobs:
                       android:name="flutterEmbedding"
                       android:value="2" />
               </application>
-          </manifest>
-          EOF
+          </manifest>'''
+          open('android/app/src/main/AndroidManifest.xml', 'w').write(manifest)
 
-          mkdir -p android/app/src/main/kotlin/com/tcmu1/controller
-          cat << 'EOF' > android/app/src/main/kotlin/com/tcmu1/controller/MainActivity.kt
-          package com.tcmu1.controller
+          kt_dir = 'android/app/src/main/kotlin/com/tcmu1/controller'
+          os.makedirs(kt_dir, exist_ok=True)
+          kt_code = '''package com.tcmu1.controller
 
           import android.Manifest
           import android.app.KeyguardManager
@@ -99,8 +75,6 @@ jobs:
           import android.os.Bundle
           import android.provider.Telephony
           import android.telephony.SmsManager
-          import androidx.core.app.ActivityCompat
-          import androidx.core.content.ContextCompat
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
@@ -118,24 +92,26 @@ jobs:
                   methodChannel?.setMethodCallHandler { call, result ->
                       when (call.method) {
                           "requestPermissions" -> {
-                              ActivityCompat.requestPermissions(
-                                  this,
-                                  arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS),
-                                  101
-                              )
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                  requestPermissions(
+                                      arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS),
+                                      101
+                                  )
+                              }
                               result.success(true)
                           }
                           "sendSms" -> {
                               val number = call.argument<String>("number") ?: ""
                               val message = call.argument<String>("message") ?: ""
                               try {
-                                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                                      checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                                      requestPermissions(arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS), 101)
+                                      result.success(false)
+                                  } else {
                                       val smsManager = SmsManager.getDefault()
                                       smsManager.sendTextMessage(number, null, message, null, null)
                                       result.success(true)
-                                  } else {
-                                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS), 101)
-                                      result.success(false)
                                   }
                               } catch (e: Exception) {
                                   result.success(false)
@@ -143,8 +119,9 @@ jobs:
                           }
                           "authenticateDevice" -> {
                               val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-                              if (km.isKeyguardSecure) {
-                                  val intent = km.createConfirmDeviceCredentialIntent("TCMU-1 Security", "Unlock with your Phone PIN, Pattern, or Fingerprint")
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && km.isKeyguardSecure) {
+                                  @Suppress("DEPRECATION")
+                                  val intent = km.createConfirmDeviceCredentialIntent("TCMU-1 Security", "Unlock with Phone PIN, Pattern, or Fingerprint")
                                   if (intent != null) {
                                       pendingAuthResult = result
                                       startActivityForResult(intent, AUTH_REQ_CODE)
@@ -154,6 +131,17 @@ jobs:
                               } else {
                                   result.success(true)
                               }
+                          }
+                          "shareText" -> {
+                              val text = call.argument<String>("text") ?: ""
+                              val sendIntent = Intent().apply {
+                                  action = Intent.ACTION_SEND
+                                  putExtra(Intent.EXTRA_TEXT, text)
+                                  type = "text/plain"
+                              }
+                              val shareIntent = Intent.createChooser(sendIntent, "Share Cash Memo")
+                              startActivity(shareIntent)
+                              result.success(true)
                           }
                           else -> result.notImplemented()
                       }
@@ -185,7 +173,7 @@ jobs:
                       }
                   }
                   val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                  if (Build.VERSION.SDK_INT >= 33) {
                       registerReceiver(smsReceiver, filter, Context.RECEIVER_EXPORTED)
                   } else {
                       registerReceiver(smsReceiver, filter)
@@ -199,16 +187,14 @@ jobs:
                   super.onDestroy()
               }
           }
-          EOF
+          '''
+          open(os.path.join(kt_dir, 'MainActivity.kt'), 'w').write(kt_code)
 
-          cat << 'EOF' > lib/main.dart
-          import 'dart:async';
+          dart_code = '''import 'dart:async';
           import 'dart:convert';
+          import 'dart:io';
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
-          import 'package:shared_preferences/shared_preferences.dart';
-          import 'package:intl/intl.dart';
-          import 'package:share_plus/share_plus.dart';
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
@@ -273,13 +259,15 @@ jobs:
             final TextEditingController _custCtrl = TextEditingController();
             final TextEditingController _rateCtrl = TextEditingController(text: '120');
             final TextEditingController _manualAmtCtrl = TextEditingController();
+            final TextEditingController _simCtrl = TextEditingController(text: '+919876543210');
+            final TextEditingController _timerXCtrl = TextEditingController(text: '2');
 
             List<Map<String, dynamic>> _history = [];
 
             @override
             void initState() {
               super.initState();
-              _loadPrefs();
+              _loadLocalState();
               platform.invokeMethod('requestPermissions');
               platform.setMethodCallHandler((call) async {
                 if (call.method == 'onSmsReceived') {
@@ -289,46 +277,56 @@ jobs:
               });
             }
 
-            Future<void> _loadPrefs() async {
-              final p = await SharedPreferences.getInstance();
-              setState(() {
-                _motorSim = p.getString('motorSim') ?? '+919876543210';
-                _stickyRate = p.getDouble('stickyRate') ?? 120.0;
-                _rateCtrl.text = _stickyRate.toStringAsFixed(0);
-                _autoMode = p.getBool('autoMode') ?? true;
-                _users = p.getStringList('users') ?? ['8081728811', '7839455008', '', '9236504217'];
-                _cmdStart = p.getString('cmdStart') ?? '1*';
-                _replyStart = p.getString('replyStart') ?? 'PUMP STARTED';
-                _cmdStop = p.getString('cmdStop') ?? '2*';
-                _replyStop = p.getString('replyStop') ?? 'PUMP STOPPED';
-                _replyTimerStart = p.getString('replyTimerStart') ?? 'PUMP STARTED';
-                _replyTimerEnd = p.getString('replyTimerEnd') ?? 'PUMP STOPPED';
-                _replyPowerCut = p.getString('replyPowerCut') ?? 'POWER OFF PUMP OFF';
-                _replyPowerResume = p.getString('replyPowerResume') ?? 'POWER RESUME PUMP STARTED';
-                _replyPhysStart = p.getString('replyPhysStart') ?? 'manual start';
-                _replyPhysStop = p.getString('replyPhysStop') ?? 'manual stop';
-                final rawHist = p.getStringList('history') ?? [];
-                _history = rawHist.map((e) => Map<String, dynamic>.from(jsonDecode(e))).toList();
-              });
+            File get _stateFile => File('${Directory.systemTemp.path}/tcmu1_state_v1.json');
+
+            Future<void> _loadLocalState() async {
+              try {
+                if (await _stateFile.exists()) {
+                  final data = jsonDecode(await _stateFile.readAsString());
+                  setState(() {
+                    _motorSim = data['motorSim'] ?? '+919876543210';
+                    _simCtrl.text = _motorSim;
+                    _stickyRate = (data['stickyRate'] ?? 120.0).toDouble();
+                    _rateCtrl.text = _stickyRate.toStringAsFixed(0);
+                    _autoMode = data['autoMode'] ?? true;
+                    _users = List<String>.from(data['users'] ?? ['8081728811', '7839455008', '', '9236504217']);
+                    _cmdStart = data['cmdStart'] ?? '1*';
+                    _replyStart = data['replyStart'] ?? 'PUMP STARTED';
+                    _cmdStop = data['cmdStop'] ?? '2*';
+                    _replyStop = data['replyStop'] ?? 'PUMP STOPPED';
+                    _replyTimerStart = data['replyTimerStart'] ?? 'PUMP STARTED';
+                    _replyTimerEnd = data['replyTimerEnd'] ?? 'PUMP STOPPED';
+                    _replyPowerCut = data['replyPowerCut'] ?? 'POWER OFF PUMP OFF';
+                    _replyPowerResume = data['replyPowerResume'] ?? 'POWER RESUME PUMP STARTED';
+                    _replyPhysStart = data['replyPhysStart'] ?? 'manual start';
+                    _replyPhysStop = data['replyPhysStop'] ?? 'manual stop';
+                    _history = List<Map<String, dynamic>>.from(data['history'] ?? []);
+                  });
+                }
+              } catch (_) {}
             }
 
-            Future<void> _savePrefs() async {
-              final p = await SharedPreferences.getInstance();
-              await p.setString('motorSim', _motorSim);
-              await p.setDouble('stickyRate', _stickyRate);
-              await p.setBool('autoMode', _autoMode);
-              await p.setStringList('users', _users);
-              await p.setString('cmdStart', _cmdStart);
-              await p.setString('replyStart', _replyStart);
-              await p.setString('cmdStop', _cmdStop);
-              await p.setString('replyStop', _replyStop);
-              await p.setString('replyTimerStart', _replyTimerStart);
-              await p.setString('replyTimerEnd', _replyTimerEnd);
-              await p.setString('replyPowerCut', _replyPowerCut);
-              await p.setString('replyPowerResume', _replyPowerResume);
-              await p.setString('replyPhysStart', _replyPhysStart);
-              await p.setString('replyPhysStop', _replyPhysStop);
-              await p.setStringList('history', _history.map((e) => jsonEncode(e)).toList());
+            Future<void> _saveLocalState() async {
+              try {
+                final data = {
+                  'motorSim': _motorSim,
+                  'stickyRate': _stickyRate,
+                  'autoMode': _autoMode,
+                  'users': _users,
+                  'cmdStart': _cmdStart,
+                  'replyStart': _replyStart,
+                  'cmdStop': _cmdStop,
+                  'replyStop': _replyStop,
+                  'replyTimerStart': _replyTimerStart,
+                  'replyTimerEnd': _replyTimerEnd,
+                  'replyPowerCut': _replyPowerCut,
+                  'replyPowerResume': _replyPowerResume,
+                  'replyPhysStart': _replyPhysStart,
+                  'replyPhysStop': _replyPhysStop,
+                  'history': _history,
+                };
+                await _stateFile.writeAsString(jsonEncode(data));
+              } catch (_) {}
             }
 
             void _sendSms(String cmd) async {
@@ -355,12 +353,12 @@ jobs:
               if (up.contains('TCMU-1 USERS') || up.contains('USER1')) {
                 final List<String> parsed = ['', '', '', ''];
                 for (int i = 1; i <= 4; i++) {
-                  final rx = RegExp(r'USER\s*' + i.toString() + r'\s*=\s*(\d{10,12})', caseSensitive: false);
+                  final rx = RegExp(r'USER\\s*' + i.toString() + r'\\s*=\\s*(\\d{10,12})', caseSensitive: false);
                   final m = rx.firstMatch(raw);
                   if (m != null) parsed[i - 1] = m.group(1) ?? '';
                 }
                 setState(() => _users = parsed);
-                _savePrefs();
+                _saveLocalState();
                 _toast('Synced *TCMU-1 USERS* from Device!');
                 return;
               }
@@ -399,7 +397,7 @@ jobs:
             void _beginSession(String cname, String mode, int timerMinutes, {bool sendCmd = true}) {
               final double r = double.tryParse(_rateCtrl.text) ?? _stickyRate;
               _stickyRate = r;
-              _savePrefs();
+              _saveLocalState();
               setState(() {
                 _activeCustomer = cname;
                 _activeMode = mode;
@@ -435,6 +433,11 @@ jobs:
               });
             }
 
+            String _nowDateStr() {
+              final dt = DateTime.now();
+              return '${dt.day.toString().padLeft(2, "0")}/${dt.month.toString().padLeft(2, "0")}/${dt.year} ${dt.hour.toString().padLeft(2, "0")}:${dt.minute.toString().padLeft(2, "0")}';
+            }
+
             void _stopSession({bool sendCmd = true}) {
               _clock?.cancel();
               if (sendCmd) _sendSms(_cmdStop);
@@ -442,7 +445,7 @@ jobs:
               final double? man = double.tryParse(_manualAmtCtrl.text.trim());
               final double finalBill = man ?? calc;
               final rec = {
-                'date': DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now()),
+                'date': _nowDateStr(),
                 'customer': _activeCustomer.isEmpty ? 'Walk-in Customer' : _activeCustomer,
                 'mode': _activeMode,
                 'runSec': _runSec,
@@ -457,8 +460,8 @@ jobs:
                 _history.insert(0, rec);
                 _manualAmtCtrl.clear();
               });
-              _savePrefs();
-              _toast('Cash Memo Generated: ₹${finalBill.toStringAsFixed(2)}');
+              _saveLocalState();
+              _toast('Cash Memo Saved: ₹${finalBill.toStringAsFixed(2)}');
             }
 
             String _hms(int s) {
@@ -480,7 +483,7 @@ jobs:
 
               return Scaffold(
                 appBar: AppBar(
-                  title: const Text('TCMU-1 Smart Controller'),
+                  title: const Text('TCMU-1 Smart Billing'),
                   backgroundColor: const Color(0xFF0F766E),
                   foregroundColor: Colors.white,
                   actions: [
@@ -498,6 +501,7 @@ jobs:
                       padding: const EdgeInsets.all(16),
                       children: [
                         Card(
+                          elevation: 2,
                           child: Padding(
                             padding: const EdgeInsets.all(16),
                             child: Column(
@@ -506,8 +510,8 @@ jobs:
                                 Text('PUMP: $_motorState | POWER: $_powerState | SIGNAL: $_signal',
                                     style: const TextStyle(fontWeight: FontWeight.bold)),
                                 const SizedBox(height: 8),
-                                Text('Running Time: ${_hms(_runSec)}',
-                                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.teal)),
+                                Text('Running: ${_hms(_runSec)}',
+                                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF0F766E))),
                                 Text('Power Cut Minus: ${_hms(_cutSec)}'),
                                 const SizedBox(height: 6),
                                 Text('CASH MEMO BILL: ₹${liveBill.toStringAsFixed(2)}',
@@ -533,7 +537,7 @@ jobs:
                                   final r = double.tryParse(v);
                                   if (r != null && r > 0) {
                                     setState(() => _stickyRate = r);
-                                    _savePrefs();
+                                    _saveLocalState();
                                   }
                                 },
                               ),
@@ -558,11 +562,23 @@ jobs:
                         const SizedBox(height: 10),
                         Row(
                           children: [
+                            SizedBox(
+                              width: 90,
+                              child: TextField(
+                                controller: _timerXCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'X (1=30m)', border: OutlineInputBorder()),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
                             Expanded(
                               child: ElevatedButton(
                                 style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(48)),
-                                onPressed: () => _beginSession(_custCtrl.text.isEmpty ? 'Timer Customer' : _custCtrl.text, 'Timer 1Hr (3*2)', 60),
-                                child: const Text('⏱️ TIMER 1 HR (3*2)'),
+                                onPressed: () {
+                                  final int x = (int.tryParse(_timerXCtrl.text) ?? 2).clamp(1, 47);
+                                  _beginSession(_custCtrl.text.isEmpty ? 'Timer Customer' : _custCtrl.text, 'Timer (3*$x)', x * 30);
+                                },
+                                child: const Text('⏱️ TIMER START (3*X)'),
                               ),
                             ),
                             const SizedBox(width: 8),
@@ -574,7 +590,7 @@ jobs:
                                   _startClock();
                                   _sendSms(_cmdStart);
                                 },
-                                child: const Text('▶️ CONTINUE START'),
+                                child: const Text('▶️ CONTINUE'),
                               ),
                             ),
                           ],
@@ -592,15 +608,29 @@ jobs:
                       itemCount: _history.length,
                       itemBuilder: (ctx, i) {
                         final r = _history[i];
+                        final bool paid = r['isPaid'] ?? true;
                         return Card(
                           child: ListTile(
-                            title: Text('${r['customer']} — ₹${(r['bill'] as num).toStringAsFixed(2)}'),
+                            title: Text('${r['customer']} — ₹${(r['bill'] as num).toStringAsFixed(2)} (${paid ? "PAID" : "UDHAAR"})'),
                             subtitle: Text('${r['date']} | Run: ${_hms(r['runSec'] ?? 0)} | Rate: ₹${r['rate']}/hr'),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.share, color: Colors.teal),
-                              onPressed: () {
-                                Share.share('🧾 *CASH MEMO*\nDate: ${r['date']}\nCustomer: ${r['customer']}\nRunning Time: ${_hms(r['runSec'] ?? 0)}\nRate: ₹${r['rate']}/hr\n*TOTAL BILL: ₹${(r['bill'] as num).toStringAsFixed(2)}*');
-                              },
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() => _history[i]['isPaid'] = !paid);
+                                    _saveLocalState();
+                                  },
+                                  child: Text(paid ? 'Udhaar' : 'Paid'),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.share, color: Colors.teal),
+                                  onPressed: () {
+                                    final memo = '🧾 *CASH MEMO*\\nDate: ${r['date']}\\nCustomer: ${r['customer']}\\nRunning Time: ${_hms(r['runSec'] ?? 0)}\\nRate: ₹${r['rate']}/hr\\n*TOTAL BILL: ₹${(r['bill'] as num).toStringAsFixed(2)}* (${paid ? "PAID" : "UDHAAR"})';
+                                    platform.invokeMethod('shareText', {'text': memo});
+                                  },
+                                ),
+                              ],
                             ),
                           ),
                         );
@@ -610,11 +640,11 @@ jobs:
                       padding: const EdgeInsets.all(16),
                       children: [
                         TextField(
-                          decoration: const InputDecoration(labelText: 'Motor Controller SIM Number'),
-                          controller: TextEditingController(text: _motorSim),
-                          onSubmitted: (v) {
-                            setState(() => _motorSim = v);
-                            _savePrefs();
+                          controller: _simCtrl,
+                          decoration: const InputDecoration(labelText: 'Motor Controller SIM Number', border: OutlineInputBorder()),
+                          onChanged: (v) {
+                            _motorSim = v.trim();
+                            _saveLocalState();
                           },
                         ),
                         SwitchListTile(
@@ -622,7 +652,7 @@ jobs:
                           value: _autoMode,
                           onChanged: (v) {
                             setState(() => _autoMode = v);
-                            _savePrefs();
+                            _saveLocalState();
                             _sendSms(v ? '4*1' : '4*0');
                           },
                         ),
@@ -631,14 +661,75 @@ jobs:
                         for (int i = 0; i < 4; i++)
                           ListTile(
                             title: Text('USER ${i + 1}: ${_users[i].isEmpty ? "Empty" : _users[i]}'),
-                            trailing: TextButton(
-                              onPressed: () => _sendSms('16*${i + 1}'),
-                              child: const Text('DEL', style: TextStyle(color: Colors.red)),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                TextButton(
+                                  onPressed: () => _showAddUserDialog(i + 1),
+                                  child: const Text('ADD', style: TextStyle(color: Colors.green)),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() => _users[i] = '');
+                                    _saveLocalState();
+                                    _sendSms('16*${i + 1}');
+                                  },
+                                  child: const Text('DEL', style: TextStyle(color: Colors.red)),
+                                ),
+                              ],
                             ),
                           ),
                         ElevatedButton(
                           onPressed: () => _sendSms('10*'),
                           child: const Text('Sync Users from Device (10*)'),
+                        ),
+                        const SizedBox(height: 8),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700, foregroundColor: Colors.white),
+                          onPressed: () {
+                            setState(() => _users = ['', '', '', '']);
+                            _saveLocalState();
+                            _sendSms('16*1234');
+                          },
+                          child: const Text('RESET ALL USERS (16*1234)'),
+                        ),
+                        const Divider(height: 28),
+                        const Text('Universal SMS Replies Config (Paste Later)', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(labelText: 'Timer (3*X) Start Reply', border: OutlineInputBorder()),
+                          controller: TextEditingController(text: _replyTimerStart),
+                          onChanged: (v) {
+                            _replyTimerStart = v.trim();
+                            _saveLocalState();
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(labelText: 'Timer (3*X) Finish Reply', border: OutlineInputBorder()),
+                          controller: TextEditingController(text: _replyTimerEnd),
+                          onChanged: (v) {
+                            _replyTimerEnd = v.trim();
+                            _saveLocalState();
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(labelText: 'Physical Start SMS (Case-Insensitive)', border: OutlineInputBorder()),
+                          controller: TextEditingController(text: _replyPhysStart),
+                          onChanged: (v) {
+                            _replyPhysStart = v.trim();
+                            _saveLocalState();
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(labelText: 'Physical Stop SMS (Case-Insensitive)', border: OutlineInputBorder()),
+                          controller: TextEditingController(text: _replyPhysStop),
+                          onChanged: (v) {
+                            _replyPhysStop = v.trim();
+                            _saveLocalState();
+                          },
                         ),
                       ],
                     ),
@@ -662,14 +753,45 @@ jobs:
                 ),
               );
             }
-          }
-          EOF
 
-          flutter pub get
-          flutter build apk --release --no-tree-shake-icons
+            void _showAddUserDialog(int slot) {
+              final c = TextEditingController(text: _users[slot - 1]);
+              showDialog(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: Text('Set USER $slot (1$slot*<mobile>*)'),
+                  content: TextField(
+                    controller: c,
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(labelText: '10-Digit Mobile Number'),
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                    ElevatedButton(
+                      onPressed: () {
+                        final numStr = c.text.trim();
+                        if (numStr.isNotEmpty) {
+                          setState(() => _users[slot - 1] = numStr);
+                          _saveLocalState();
+                          _sendSms('1$slot*$numStr*');
+                        }
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('Save & Send SMS'),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          '''
+          open('lib/main.dart', 'w').write(dart_code)
+          PYEOF
+
+          flutter build apk --release
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
         with:
           name: TCMU1-Smart-Billing-Release-APK
-          path: clean_app/build/app/outputs/flutter-apk/app-release.apk
+          path: tcmu1_app/build/app/outputs/flutter-apk/app-release.apk
