@@ -129,7 +129,6 @@ jobs:
           import android.database.Cursor
           import android.net.Uri
           import android.os.Build
-          import android.os.Bundle
           import android.os.PowerManager
           import android.provider.Settings
           import android.telephony.SmsManager
@@ -368,7 +367,7 @@ jobs:
 
             // Universal Config State
             String _motorSim = '+919876543210';
-            double _stickyRate = 120.0; // Jo rate ek baar pad jaye wahi aage sab pe chale
+            double _stickyRate = 120.0;
             List<String> _users = ['8081728811', '7839455008', '', '9236504217'];
 
             String _cmdStart = '1*';
@@ -385,9 +384,8 @@ jobs:
             String _replyPhysStop = 'manual stop';
 
             // Live Running Session State
-            String _motorState = 'STOPPED'; // STOPPED, RUNNING, PAUSED_POWER_CUT
+            String _motorState = 'STOPPED';
             String _powerState = 'AVAILABLE';
-            String _batteryState = 'CHARGING';
             String _signalState = '63%';
             String _activeSessionMode = 'Normal (1*)';
             DateTime? _sessionStartTime;
@@ -403,7 +401,7 @@ jobs:
             // Account / Hisab Sessions List
             List<Map<String, dynamic>> _sessions = [];
 
-            // Controllers for Settings Tab (matches TCMU1_Config_Users_UI.png)
+            // Controllers for Settings Tab
             final TextEditingController _simCtrl = TextEditingController(text: '+919876543210');
             late List<TextEditingController> _userCtrls;
             final TextEditingController _cmdStartCtrl = TextEditingController(text: '1*');
@@ -552,7 +550,6 @@ jobs:
               } catch (_) {}
             }
 
-            // Read phone SMS inbox to reconstruct any missed sessions while phone/app was closed
             Future<void> _syncFromPhoneSmsInbox() async {
               try {
                 final String rawJson = await platform.invokeMethod('readRecentInboxSms', {'motorSim': _motorSim}) ?? '[]';
@@ -639,19 +636,16 @@ jobs:
               final String body = rawBody.trim();
               final String up = body.toUpperCase();
 
-              // 1. Users List Reply (*TCMU-1 USERS*)
               if (up.contains('TCMU-1 USERS') || up.contains('USER1')) {
                 _parseUsersFromSms(body);
                 _toast('Users Synced from TCMU-1 Device!');
                 return;
               }
 
-              // 2. Status Reply (**TCMU-1 STATUS**)
               if (up.contains('TCMU-1 STATUS')) {
                 setState(() {
                   if (up.contains('POWER AVAILABLE')) _powerState = 'AVAILABLE';
                   if (up.contains('POWER OFF')) _powerState = 'OFF';
-                  if (up.contains('CHARGING')) _batteryState = 'CHARGING';
                   final sig = RegExp(r'SIGNAL\s*:\s*(\d+%)', caseSensitive: false).firstMatch(body);
                   if (sig != null) _signalState = sig.group(1)!;
                   if (up.contains('MODE : AUTO')) _electricityAutoRestartRadio = true;
@@ -661,7 +655,6 @@ jobs:
                 return;
               }
 
-              // 3. Power Cut (Pause Session)
               if (_replyPowerCut.isNotEmpty && up.contains(_replyPowerCut.toUpperCase())) {
                 if (_motorState == 'RUNNING') {
                   setState(() {
@@ -673,7 +666,6 @@ jobs:
                 return;
               }
 
-              // 4. Power Resume (Resume Session)
               if (_replyPowerResume.isNotEmpty && up.contains(_replyPowerResume.toUpperCase())) {
                 if (_motorState == 'PAUSED_POWER_CUT') {
                   setState(() {
@@ -686,7 +678,6 @@ jobs:
                 return;
               }
 
-              // 5. Physical Manual Start (Case-insensitive substring match)
               if (_replyPhysStart.isNotEmpty && up.contains(_replyPhysStart.toUpperCase())) {
                 _retryTimer?.cancel();
                 if (_motorState == 'STOPPED') {
@@ -696,7 +687,6 @@ jobs:
                 return;
               }
 
-              // 6. Physical Manual Stop or Normal/Timer Stop
               if ((_replyPhysStop.isNotEmpty && up.contains(_replyPhysStop.toUpperCase())) ||
                   (_replyStop.isNotEmpty && up.contains(_replyStop.toUpperCase())) ||
                   (_replyTimerEnd.isNotEmpty && up.contains(_replyTimerEnd.toUpperCase()))) {
@@ -708,7 +698,6 @@ jobs:
                 return;
               }
 
-              // 7. Normal Start / Timer Start Reply
               if ((_replyStart.isNotEmpty && up.contains(_replyStart.toUpperCase())) ||
                   (_replyTimerStart.isNotEmpty && up.contains(_replyTimerStart.toUpperCase()))) {
                 _retryTimer?.cancel();
@@ -907,7 +896,6 @@ jobs:
                           _currentTab = 2;
                         });
                       } else {
-                        // Show fallback dialog so user is never blocked from Settings
                         _showUnlockFallbackDialog();
                       }
                       return;
@@ -946,9 +934,6 @@ jobs:
               );
             }
 
-            // ===================================================================
-            // TAB 1: MAIN CONTROL (Radio Buttons for Electricity & Motor ON/OFF)
-            // ===================================================================
             Widget _buildTab1MainControl() {
               final bool isRunning = _motorState == 'RUNNING';
               final bool isPaused = _motorState == 'PAUSED_POWER_CUT';
@@ -956,7 +941,6 @@ jobs:
               return ListView(
                 padding: const EdgeInsets.all(14),
                 children: [
-                  // Permission & Background Service Banner
                   if (!_smsPermGranted)
                     Card(
                       color: const Color(0xFFFEF3C7),
@@ -997,7 +981,6 @@ jobs:
                       ),
                     ),
 
-                  // 1. Live Status & Timer Card
                   Card(
                     elevation: 2,
                     color: Colors.white,
@@ -1062,7 +1045,6 @@ jobs:
 
                   const SizedBox(height: 12),
 
-                  // 2. Continue with Electricity ON / OFF (Radio Buttons)
                   Card(
                     elevation: 1,
                     color: Colors.white,
@@ -1113,7 +1095,6 @@ jobs:
 
                   const SizedBox(height: 12),
 
-                  // 3. Motor ON / OFF / Continue / Timer (Radio Button Group)
                   Card(
                     elevation: 1,
                     color: Colors.white,
@@ -1212,9 +1193,6 @@ jobs:
               );
             }
 
-            // ===================================================================
-            // TAB 2: SEPARATE ACCOUNT / HISAB TAB (Click Session -> Name, Rate, Manual Bill)
-            // ===================================================================
             Widget _buildTab2AccountHisab() {
               double totalPaid = 0;
               double totalPending = 0;
@@ -1276,7 +1254,7 @@ jobs:
                           children: [
                             Expanded(
                               child: OutlinedButton.icon(
-                                icon: const Icon(Icons.sms_Rounded, size: 16),
+                                icon: const Icon(Icons.sms, size: 16),
                                 label: const Text('Sync Missed SMS from Inbox', style: TextStyle(fontSize: 12)),
                                 onPressed: _syncFromPhoneSmsInbox,
                               ),
@@ -1293,7 +1271,7 @@ jobs:
                             child: Padding(
                               padding: EdgeInsets.all(24),
                               child: Text(
-                                'Abhi koi session record nahi hai.\nJab motor chalegi aur band hogi (ya aap ऊपर "Sync Missed SMS" dabayenge), toh har session yahan dikhega.',
+                                'Abhi koi session record nahi hai.\nJab motor chalegi aur band hogi (ya aap upar "Sync Missed SMS" dabayenge), toh har session yahan dikhega.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(color: Colors.black54),
                               ),
@@ -1382,8 +1360,6 @@ jobs:
               );
             }
 
-            // Popup when clicking any session in Account tab:
-            // Customer Name + Sticky Rate + Manual Override Box + Share Cash Memo
             void _openSessionBillingPopup(int index) {
               final s = _sessions[index];
               final nameCtrl = TextEditingController(
@@ -1503,7 +1479,6 @@ jobs:
                           style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white),
                           onPressed: () {
                             setState(() {
-                              // Update sticky rate for all future sessions!
                               _stickyRate = enteredRate;
                               _sessions[index]['customer'] =
                                   nameCtrl.text.trim().isEmpty ? 'Walk-in Customer' : nameCtrl.text.trim();
@@ -1527,14 +1502,10 @@ jobs:
               );
             }
 
-            // ===================================================================
-            // TAB 3: SETTINGS & UNIVERSAL SMS CONFIG (Matches TCMU1_Config_Users_UI.png)
-            // ===================================================================
             Widget _buildTab3SettingsAndConfig() {
               return ListView(
                 padding: const EdgeInsets.all(14),
                 children: [
-                  // CARD 1: SETTINGS & USERS (Left side of user's reference image)
                   Card(
                     elevation: 2,
                     color: Colors.white,
@@ -1711,7 +1682,6 @@ jobs:
 
                   const SizedBox(height: 16),
 
-                  // CARD 2: UNIVERSAL SMS CONFIG (Right side of user's reference image)
                   Card(
                     elevation: 2,
                     color: Colors.white,
